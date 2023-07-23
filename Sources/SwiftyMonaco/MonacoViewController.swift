@@ -50,11 +50,10 @@ public class MonacoViewController: ViewController, WKUIDelegate, WKNavigationDel
     
     // MARK: - Dark Mode
     private func updateTheme() {
-        evaluateJavascript("""
-        (function(){
-            monaco.editor.setTheme('\(detectTheme())')
-        })()
-        """)
+        let javascript = """
+        monaco.editor.setTheme('\(detectTheme())')
+        """
+        evaluateJavascript(iife(javascript))
     }
     
     #if os(macOS)
@@ -85,6 +84,21 @@ public class MonacoViewController: ViewController, WKUIDelegate, WKNavigationDel
                 return "vs"
         }
         #endif
+    }
+    
+    public func registerOnDidChangeCursorPosition() {
+        let eventType = "ICursorPositionChangedEvent"
+        let queue = "\(eventType)Queue"
+        
+        webView.configuration.userContentController.add(ICursorPositionChangedEventHandler(self), name: queue)
+        
+        let javascript = """
+        editor.editor.onDidChangeCursorPosition(e => {
+            window.webkit.messageHandlers.\(queue).postMessage(JSON.stringify(e));
+        });
+        """
+        
+        evaluateJavascript(iife(javascript))
     }
     
     // MARK: - WKWebView
@@ -137,17 +151,18 @@ public class MonacoViewController: ViewController, WKUIDelegate, WKNavigationDel
         // Code itself
         let text = self.delegate?.monacoView(readText: self) ?? ""
         let b64 = text.data(using: .utf8)?.base64EncodedString()
-        let javascript =
-        """
-        (function() {
+        
+        let javascript = """
         \(syntaxJS)
 
         editor.create({value: atob('\(b64 ?? "")'), automaticLayout: true, theme: "\(theme)"\(syntaxJS2), \(minimap), \(scrollbar), \(smoothCursor), \(cursorBlink), \(fontSize)});
         var meta = document.createElement('meta'); meta.setAttribute('name', 'viewport'); meta.setAttribute('content', 'width=device-width'); document.getElementsByTagName('head')[0].appendChild(meta);
         return true;
-        })();
         """
-        evaluateJavascript(javascript)
+        
+        evaluateJavascript(iife(javascript))
+        
+        registerOnDidChangeCursorPosition()
     }
     
     private func evaluateJavascript(_ javascript: String) {
@@ -198,6 +213,53 @@ private extension MonacoViewController {
             parent.delegate?.monacoView(controller: parent, textDidChange: text)
         }
     }
+    
+    final class ICursorPositionChangedEventHandler: NSObject, WKScriptMessageHandler {
+        
+        struct Position: Codable {
+            let lineNumber: Int
+            let column: Int
+        }
+        
+        enum CursorChangeReason: Int, Codable {
+            case NotSet = 0
+            case ContentFlush = 1
+            case RecoverFromMarkers = 2
+            case Explicit = 3
+            case Paste = 4
+            case Undo = 5
+            case Redo = 6
+        }
+        
+        struct ICursorPositionChangedEvent: Codable {
+            let position: Position
+            let secondaryPositions: [Position]
+            let reason: CursorChangeReason
+            let source: String
+        }
+        
+        private let parent: MonacoViewController
+        
+        init(_ parent: MonacoViewController) {
+            self.parent = parent
+        }
+        
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let encodedText = message.body as? String,
+                  let data = encodedText.data(using: .utf8) else {
+                return
+            }
+            
+            do {
+                let decoder = JSONDecoder()
+                let decoded = try decoder.decode(ICursorPositionChangedEvent.self, from: data)
+                print(decoded.position)
+            } catch {
+                
+            }
+            
+        }
+    }
 }
 
 // MARK: - Delegate
@@ -212,4 +274,14 @@ public protocol MonacoViewControllerDelegate {
     func monacoView(getFontSize controller: MonacoViewController) -> Int
     func monacoView(getTheme controller: MonacoViewController) -> Theme?
     func monacoView(controller: MonacoViewController, textDidChange: String)
+}
+
+extension MonacoViewController {
+    func iife(_ js: String) -> String {
+        return """
+        (function(){
+            \(js)
+        })()
+        """
+    }
 }
